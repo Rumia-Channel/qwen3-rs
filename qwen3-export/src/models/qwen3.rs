@@ -70,11 +70,11 @@ impl<'a> Architecture for Qwen3<'a> {
             _ => false,              // Missing embed_tokens is an error, but we'll handle it later
         };
 
-        Ok(HeaderInfo { architecture_id: self.id() as u32, shared_classifier })
+        Ok(HeaderInfo { architecture_id: self.id() as u32, shared_classifier, v2: None })
     }
 
     fn norm_weight_layers(&self) -> &[NormWeightLayer<'_>] {
-        &Self::NORM_WEIGHTS_LAYERS
+        Self::NORM_WEIGHTS_LAYERS
     }
 
     fn embed_tokens_layer(&self) -> &'static str {

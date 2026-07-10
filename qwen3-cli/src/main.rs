@@ -69,7 +69,7 @@ fn inference_subcommand() -> Command {
                 .long("context")
                 .value_name("INT")
                 .help("Context window size, (default) = max_seq_len")
-                .value_parser(clap::value_parser!(u32)),
+                .value_parser(clap::value_parser!(usize)),
         )
         .arg(
             Arg::new("mode")

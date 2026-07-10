@@ -67,7 +67,7 @@ fn test_load_hf_config_invalid_json() -> Result<()> {
 fn test_load_hf_config_missing_required_field() -> Result<()> {
     let temp_dir = TempDir::new()?;
 
-    // Config missing required "hidden_size" field
+    // Config missing both architecture and hidden_size
     let config_content = r#"{
         "intermediate_size": 1024,
         "num_hidden_layers": 4
@@ -78,10 +78,38 @@ fn test_load_hf_config_missing_required_field() -> Result<()> {
 
     let result = load_hf_config(&config_path);
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err().to_string(),
-        "Failed to parse config.json: missing field `hidden_size` at line 4 column 5"
-    );
+    // The new loader first checks for the architecture field
+    assert!(result.unwrap_err().to_string().contains("architectures"));
+
+    Ok(())
+}
+
+#[test]
+fn test_load_official_qwen35_2b_config() -> Result<()> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sample/Qwen/Qwen3.5-2B/config.json");
+    let config = load_hf_config(&path)?;
+
+    assert_eq!(config.architecture, ArchitectureId::Qwen3_5ForConditionalGeneration);
+    assert_eq!(config.dim, 2048);
+    assert_eq!(config.hidden_dim, 6144);
+    assert_eq!(config.n_layers, 24);
+    assert_eq!(config.n_heads, 8);
+    assert_eq!(config.n_kv_heads, 2);
+    assert_eq!(config.head_dim, 256);
+    assert_eq!(config.vocab_size, 248_320);
+    assert_eq!(config.max_seq_len, 262_144);
+    assert_eq!(config.eos_token_id, 248_044);
+
+    let q35 = config.qwen35.expect("Qwen3.5 metadata");
+    assert_eq!(q35.chat_eos, 248_046);
+    assert_eq!(q35.n_linear_k_heads, 16);
+    assert_eq!(q35.n_linear_v_heads, 16);
+    assert_eq!(q35.linear_k_head_dim, 128);
+    assert_eq!(q35.linear_v_head_dim, 128);
+    assert_eq!(q35.conv_kernel_size, 4);
+    assert_eq!(q35.rotary_dim, 64);
+    assert_eq!(q35.full_attention_mask, 0x88_88_88);
+    assert_eq!(q35.rope_theta, 10_000_000.0);
 
     Ok(())
 }

@@ -405,10 +405,9 @@ impl MultiHeadAttention {
 
                 // Compute weighted sum of values
                 xb_slice.fill(0.0);
-                for time_step in 0..=pos {
+                for (time_step, &attention_weight) in att_head.iter().enumerate() {
                     let v_cache_start = kv_cache_offset + time_step * kv_dim + kv_head_idx * self.head_dim;
                     let v_cache_end = v_cache_start + self.head_dim;
-                    let attention_weight = att_head[time_step];
 
                     xb_slice
                         .iter_mut()

@@ -20,6 +20,7 @@ mod basic {
             bos_token_id: 0,
             eos_token_id: 1,
             architecture: ArchitectureId::Qwen3ForCausalLM,
+            qwen35: None,
         }
     }
 
@@ -196,6 +197,7 @@ mod advanced {
             norm_eps: 1e-5,
             bos_token_id: 0,
             eos_token_id: 1,
+            qwen35: None,
         }
     }
 
@@ -385,9 +387,7 @@ mod advanced {
 
         // Test with very large values
         let large_weights = vec![1e30, -1e30, 1e29, -1e29];
-        let large_result = exporter.quantize_q80(&large_weights);
-        if large_result.is_ok() {
-            let result = large_result.unwrap();
+        if let Ok(result) = exporter.quantize_q80(&large_weights) {
             assert!(result.scales[0].is_finite());
         }
     }

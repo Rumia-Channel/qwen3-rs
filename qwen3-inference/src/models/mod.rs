@@ -15,23 +15,70 @@ pub trait Transformer {
     fn forward(&mut self, token: usize, pos: usize) -> &[f32];
 
     fn get_config(&self) -> &ModelConfig;
+
+    /// Reset all cached state (KV caches, recurrent state, convolution buffers).
+    /// Default implementation is a no-op for models without persistent caches.
+    fn reset_cache(&mut self) {}
+
+    /// Prompt prefill: process all tokens but compute logits only for the final token.
+    /// Default implementation calls `forward` token-by-token and returns the last logits.
+    fn prefill(&mut self, tokens: &[usize]) -> &[f32] {
+        let Some((&last_token, prefix)) = tokens.split_last() else {
+            return &[];
+        };
+        for (pos, &token) in prefix.iter().enumerate() {
+            self.forward(token, pos);
+        }
+        self.forward(last_token, prefix.len())
+    }
 }
+
+mod qwen3_5;
 
 #[non_exhaustive]
 pub enum Transformers {
-    Qwen3(qwen3::Qwen3Transformer),
+    Qwen3(Box<qwen3::Qwen3Transformer>),
+    Qwen3_5(Box<qwen3_5::Qwen3_5Transformer>),
 }
 
 impl Transformer for Transformers {
     fn forward(&mut self, token: usize, pos: usize) -> &[f32] {
         match self {
             Transformers::Qwen3(model) => model.forward(token, pos),
+            Transformers::Qwen3_5(model) => model.forward(token, pos),
         }
     }
 
     fn get_config(&self) -> &ModelConfig {
         match self {
             Transformers::Qwen3(model) => model.get_config(),
+            Transformers::Qwen3_5(model) => model.get_config(),
+        }
+    }
+
+    fn reset_cache(&mut self) {
+        match self {
+            Transformers::Qwen3(_) => {
+                // Qwen3 uses no-op default from trait
+            }
+            Transformers::Qwen3_5(model) => {
+                model.reset_cache_impl();
+            }
+        }
+    }
+
+    fn prefill(&mut self, tokens: &[usize]) -> &[f32] {
+        match self {
+            Transformers::Qwen3(_) => {
+                let Some((&last_token, prefix)) = tokens.split_last() else {
+                    return &[];
+                };
+                for (pos, &token) in prefix.iter().enumerate() {
+                    self.forward(token, pos);
+                }
+                self.forward(last_token, prefix.len())
+            }
+            Transformers::Qwen3_5(model) => model.prefill_impl(tokens),
         }
     }
 }
@@ -61,13 +108,24 @@ impl TransformerBuilder {
         // Read config from the first part of the file
         let mut config = read_config(&mut mapper)?;
 
-        // Apply context length override if provided
-        if let Some(ctx_len) = self.ctx_length {
-            config.seq_len = ctx_len.min(config.seq_len);
+        // Apply context length
+        match self.ctx_length {
+            Some(ctx_len) => {
+                // Explicit override: bound by model maximum
+                config.seq_len = ctx_len.min(config.seq_len);
+            }
+            None if config.architecture_id == 3 => {
+                // Qwen3.5 defaults to 4096 when no --context given
+                config.seq_len = config.seq_len.min(4096);
+            }
+            _ => {
+                // Qwen3 uses model max or global default unchanged
+            }
         }
 
         match config.architecture_id {
-            1 => Ok(Transformers::Qwen3(qwen3::Qwen3Transformer::new(config, mapper)?)),
+            1 => Ok(Transformers::Qwen3(Box::new(qwen3::Qwen3Transformer::new(config, mapper)?))),
+            3 => Ok(Transformers::Qwen3_5(Box::new(qwen3_5::Qwen3_5Transformer::new(config, mapper)?))),
             x => anyhow::bail!("Unknown architecture_id: {x}"),
         }
     }

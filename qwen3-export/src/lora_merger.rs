@@ -3,6 +3,8 @@ use anyhow::Result;
 use log::{debug, warn};
 use rayon::prelude::*;
 
+type LoraPair = (Option<Vec<f32>>, Option<Vec<f32>>);
+
 /// LoraMerger applies standard LoRA merge logic on tensors: W = W_base + α / r * (B @ A)
 ///
 /// Assumptions:
@@ -63,11 +65,7 @@ impl<'a> LoraMerger<'a> {
     }
 
     /// Dynamically discover and load LoRA adapter pairs
-    fn discover_and_load_lora_pairs(
-        &self,
-        component: &str,
-        layer_idx: u32,
-    ) -> Result<(Option<Vec<f32>>, Option<Vec<f32>>)> {
+    fn discover_and_load_lora_pairs(&self, component: &str, layer_idx: u32) -> Result<LoraPair> {
         // TODO: consider supporting different patterns?
 
         // Based on the actual tensor naming pattern:
@@ -155,11 +153,11 @@ impl<'a> LoraMerger<'a> {
         // With known rank, we can directly calculate dimensions
         // LoRA format: A: (rank, in_features), B: (out_features, rank)
 
-        if a_len % self.rank != 0 {
+        if !a_len.is_multiple_of(self.rank) {
             anyhow::bail!("LoRA A tensor size ({}) is not divisible by rank ({})", a_len, self.rank);
         }
 
-        if b_len % self.rank != 0 {
+        if !b_len.is_multiple_of(self.rank) {
             anyhow::bail!("LoRA B tensor size ({}) is not divisible by rank ({})", b_len, self.rank);
         }
 

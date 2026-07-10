@@ -1,8 +1,10 @@
 .vscode/
 target/
-DeepSeek*
-Qwen3-*
+/DeepSeek*
+/Qwen3-[0-9]*
 .models
+/sample/
+.pi-subagents/
 
 notes.log
 

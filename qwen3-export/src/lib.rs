@@ -66,11 +66,17 @@ pub fn export_model(model_path: &str, output_path: &str, group_size: usize) -> R
     info!("");
 
     info!("🔤 Exporting tokenizer...");
+    // Use chat_eos if available (Qwen3.5), fall back to model eos
+    let tokenizer_eos = if let Some(ref q35) = model_info.config.qwen35 {
+        if q35.chat_eos != 0 { q35.chat_eos } else { model_info.config.eos_token_id }
+    } else {
+        model_info.config.eos_token_id
+    };
     TokenizerExporter::new().export_tokenizer(
         model_path,
         output_path,
         model_info.config.bos_token_id,
-        model_info.config.eos_token_id,
+        tokenizer_eos,
     )?;
     info!("");
 

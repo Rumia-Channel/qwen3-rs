@@ -122,7 +122,7 @@ impl Tokenizer {
     /// Decodes a token ID to a string (may be invalid UTF-8).
     ///
     /// Returns a borrowed str if valid UTF-8, otherwise an owned String.
-    pub fn decode(&self, token: usize) -> Cow<str> {
+    pub fn decode(&self, token: usize) -> Cow<'_, str> {
         if token < self.vocab.len() {
             // Try to interpret as valid UTF-8 first (no allocation needed)
             match std::str::from_utf8(&self.vocab[token]) {
@@ -174,8 +174,8 @@ impl Tokenizer {
             if chars[i] == '<' {
                 let mut end_pos = None;
                 let search_limit = chars.len().min(i + self.max_token_length as usize);
-                for j in i + 1..search_limit {
-                    if chars[j] == '>' {
+                for (j, &ch) in chars.iter().enumerate().take(search_limit).skip(i + 1) {
+                    if ch == '>' {
                         end_pos = Some(j);
                         break;
                     }
@@ -215,12 +215,12 @@ impl Tokenizer {
                 let mut merged_bytes = self.vocab[tokens[i]].clone();
                 merged_bytes.extend_from_slice(&self.vocab[tokens[i + 1]]);
 
-                if let Some(id) = self.vocab.iter().position(|token| token.as_slice() == merged_bytes.as_slice()) {
-                    if self.merge_scores[id] > best_score {
-                        best_score = self.merge_scores[id];
-                        best_id = Some(id);
-                        best_idx = Some(i);
-                    }
+                if let Some(id) = self.vocab.iter().position(|token| token.as_slice() == merged_bytes.as_slice())
+                    && self.merge_scores[id] > best_score
+                {
+                    best_score = self.merge_scores[id];
+                    best_id = Some(id);
+                    best_idx = Some(i);
                 }
             }
 

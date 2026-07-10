@@ -100,7 +100,7 @@ pub fn quantize(qx: &mut QuantizedTensor, x: &[f32], size: usize, group_size: us
     let q_data = qx.q.to_mut();
     let s_data = qx.s.to_mut();
 
-    for group in 0..num_groups {
+    for (group, scale_slot) in s_data.iter_mut().enumerate().take(num_groups) {
         let group_start = group * group_size;
         let group_end = group_start + group_size;
 
@@ -108,7 +108,7 @@ pub fn quantize(qx: &mut QuantizedTensor, x: &[f32], size: usize, group_size: us
         let wmax = x[group_start..group_end].iter().fold(0.0f32, |acc, &val| acc.max(val.abs()));
 
         let scale = wmax / Q_MAX;
-        s_data[group] = scale;
+        *scale_slot = scale;
 
         // Quantize the group
         for (i, &val) in x[group_start..group_end].iter().enumerate() {

@@ -208,10 +208,10 @@ impl MmapCache {
 
     fn insert(&mut self, path: PathBuf, mmap: Arc<Mmap>) {
         // Remove if already exists
-        if self.cache.contains_key(&path) {
-            if let Some(pos) = self.access_order.iter().position(|p| p == &path) {
-                self.access_order.remove(pos);
-            }
+        if self.cache.contains_key(&path)
+            && let Some(pos) = self.access_order.iter().position(|p| p == &path)
+        {
+            self.access_order.remove(pos);
         }
 
         // Evict least recently used if cache is full

@@ -229,18 +229,25 @@ impl ChatTemplateExporter {
     }
 
     /// Render Qwen3 template for single user message
+    ///
+    /// Generation begins `<|im_start|>assistant\n` followed by either:
+    /// - Thinking enabled: `<think>\n` (append `<think>\n` after assistant header)
+    /// - Thinking disabled: `<think>\n\n</think>\n\n` (no actual thinking, empty think block)
     fn render_qwen3_single_message_template(&self, enable_thinking: bool) -> Result<String> {
         if enable_thinking {
-            Ok("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n".to_string())
+            Ok("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n".to_string())
         } else {
             Ok("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n".to_string())
         }
     }
 
     /// Render Qwen3 template for system + user messages
+    ///
+    /// Same thinking logic as single-message variant.
     fn render_qwen3_system_message_template(&self, enable_thinking: bool) -> Result<String> {
         if enable_thinking {
-            Ok("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n".to_string())
+            Ok("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n"
+                .to_string())
         } else {
             Ok("<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n".to_string())
         }

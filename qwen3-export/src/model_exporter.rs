@@ -11,7 +11,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::lora_merger::LoraMerger;
-use crate::models::{Architecture, HeaderInfo, NormWeightLayer, WeightLayer, create_architecture};
+use crate::models::{Architecture, HeaderInfo, NormWeightLayer, create_architecture};
 use crate::tensor_reader::TensorReader;
 use crate::utils::ProgressTracker;
 use crate::{ModelConfig, ModelInfo, ModelType};
@@ -33,7 +33,11 @@ pub struct BinaryModelExporter {
 impl BinaryModelExporter {
     const MAGIC_NUMBER: u32 = 0x616A6331; // "ajc1" in ASCII
     const VERSION: i32 = 1;
+    const V1_VERSION: i32 = Self::VERSION;
+    const V2_VERSION: i32 = 2;
     const HEADER_SIZE: usize = 256;
+    const V1_CONFIG_SIZE: usize = 52; // 13 × 4 bytes (v1 fields)
+    const V2_CONFIG_SIZE: usize = 100; // v1 fields + 12 v2 fields (48 bytes)
     const MIN_GROUP_SIZE: usize = 4;
 
     pub fn new(config: ModelConfig, group_size: usize) -> Self {
@@ -49,7 +53,7 @@ impl BinaryModelExporter {
         let mut size = requested_size.min(hidden_dim);
 
         // Find largest size that divides hidden_dim
-        while size >= Self::MIN_GROUP_SIZE && hidden_dim % size != 0 {
+        while size >= Self::MIN_GROUP_SIZE && !hidden_dim.is_multiple_of(size) {
             size /= 2;
         }
 
@@ -102,7 +106,7 @@ impl BinaryModelExporter {
 
     /// Quantize weights to Q8_0 format (symmetric int8, range [-127, 127])
     pub fn quantize_q80(&self, weights: &[f32]) -> Result<QuantizedWeight> {
-        if weights.len() % self.group_size != 0 {
+        if !weights.len().is_multiple_of(self.group_size) {
             return Err(anyhow::anyhow!("Weight length is not a multiple of group_size"));
         }
 
@@ -160,16 +164,21 @@ impl BinaryModelExporter {
         Ok(QuantizedWeight { int8_data, scales, max_error })
     }
 
-    /// Write binary header
+    fn version(&self, header_info: &HeaderInfo) -> i32 {
+        if header_info.v2.is_some() { Self::V2_VERSION } else { Self::V1_VERSION }
+    }
+
+    /// Write binary header (v1 or v2 depending on architecture).
     fn write_header<W: Write>(&self, writer: &mut W, header_info: &HeaderInfo) -> Result<()> {
+        let is_v2 = header_info.v2.is_some();
+        let version = self.version(header_info);
+
         // Magic number "ajc1" in ASCII
         writer.write_u32::<LittleEndian>(Self::MAGIC_NUMBER)?;
+        writer.write_i32::<LittleEndian>(version)?;
 
-        // Version
-        writer.write_i32::<LittleEndian>(Self::VERSION)?;
-
-        // Model parameters (10 int32 values)
-        writer.write_u32::<LittleEndian>(header_info.architecture_id as u32)?;
+        // Common v1 fields (13 × 4 = 52 bytes)
+        writer.write_u32::<LittleEndian>(header_info.architecture_id)?;
         writer.write_u32::<LittleEndian>(self.config.dim)?;
         writer.write_u32::<LittleEndian>(self.config.hidden_dim)?;
         writer.write_u32::<LittleEndian>(self.config.n_layers)?;
@@ -181,11 +190,28 @@ impl BinaryModelExporter {
         writer.write_u32::<LittleEndian>(header_info.shared_classifier as u32)?;
         writer.write_u32::<LittleEndian>(self.group_size as u32)?;
 
-        // Pad to header size
-        let current_pos = 4 + 4 + 4 + 10 * 4; // magic + version + architecture_id + 10 params
-        let padding = Self::HEADER_SIZE - current_pos;
-        let zeros = vec![0u8; padding];
-        writer.write_all(&zeros)?;
+        if is_v2 {
+            let v2 = header_info.v2.as_ref().unwrap();
+            // v2 extension (12 fields = 48 bytes)
+            writer.write_f32::<LittleEndian>(v2.norm_eps)?; // 52
+            writer.write_f32::<LittleEndian>(v2.rope_theta)?; // 56
+            writer.write_u32::<LittleEndian>(v2.rotary_dim)?; // 60
+            writer.write_u32::<LittleEndian>(v2.n_linear_k_heads)?; // 64
+            writer.write_u32::<LittleEndian>(v2.n_linear_v_heads)?; // 68
+            writer.write_u32::<LittleEndian>(v2.linear_k_head_dim)?; // 72
+            writer.write_u32::<LittleEndian>(v2.linear_v_head_dim)?; // 76
+            writer.write_u32::<LittleEndian>(v2.conv_kernel_size)?; // 80
+            writer.write_u64::<LittleEndian>(v2.full_attention_mask)?; // 84-91 (8 bytes)
+            writer.write_u32::<LittleEndian>(v2.model_eos)?; // 92
+            writer.write_u32::<LittleEndian>(v2.chat_eos)?; // 96
+            // padding: 256 - 100 = 156 bytes
+            let padding = vec![0u8; Self::HEADER_SIZE - Self::V2_CONFIG_SIZE];
+            writer.write_all(&padding)?;
+        } else {
+            // v1 padding: 256 - 52 = 204 bytes
+            let padding = vec![0u8; Self::HEADER_SIZE - Self::V1_CONFIG_SIZE];
+            writer.write_all(&padding)?;
+        }
 
         Ok(())
     }
@@ -199,7 +225,7 @@ impl BinaryModelExporter {
     ) -> Result<()> {
         info!("Writing normalization weights...");
 
-        let mut write_fn = |tensor_name: &str, is_required| -> Result<()> {
+        let mut write_fn = |tensor_name: &str, is_required: bool, default_dim: u32| -> Result<()> {
             match (tensor_reader.load_tensor(tensor_name)?, is_required) {
                 (Some(attn_norm), _) => {
                     for &value in &attn_norm {
@@ -207,7 +233,8 @@ impl BinaryModelExporter {
                     }
                 }
                 (None, false) => {
-                    for _ in 0..self.config.head_dim as usize {
+                    let dim = if default_dim > 0 { default_dim as usize } else { self.config.head_dim as usize };
+                    for _ in 0..dim {
                         writer.write_f32::<LittleEndian>(1.0)?;
                     }
                 }
@@ -217,21 +244,26 @@ impl BinaryModelExporter {
             Ok(())
         };
 
-        architecture.norm_weight_layers().iter().try_for_each(|&NormWeightLayer { name, layered, is_required }| {
-            if layered {
-                for layer_idx in 0..self.config.n_layers {
-                    let layer_name = name.replace("{}", &layer_idx.to_string());
-                    write_fn(&layer_name, is_required)?;
+        architecture.norm_weight_layers().iter().try_for_each(
+            |&NormWeightLayer { name, layered, is_required, default_dim }| {
+                if layered {
+                    for layer_idx in 0..self.config.n_layers {
+                        let layer_name = name.replace("{}", &layer_idx.to_string());
+                        write_fn(&layer_name, is_required, default_dim)?;
+                    }
+                } else {
+                    write_fn(name, is_required, default_dim)?;
                 }
-            } else {
-                write_fn(name, is_required)?;
-            }
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
-    /// Stream and quantize weights one by one to minimize memory usage (LoRA-aware)
+    /// Stream and (de)quantize weights one by one to minimize memory usage (LoRA-aware).
+    /// FP32-flagged tensors are written as raw f32; others are quantised to Q8.
+    /// For v2, order is: FP32 weight layers, then Q8 embedding, then Q8 weight layers.
+    /// For v1, order is: Q8 embedding, then all weight layers (mixed FP32/Q8).
     fn stream_and_quantize_weights<W: Write>(
         &self,
         architecture: &dyn Architecture,
@@ -240,23 +272,55 @@ impl BinaryModelExporter {
         shared_classifier: bool,
         model_type: &ModelType,
     ) -> Result<()> {
+        let has_v2 = architecture.header()?.v2.is_some();
+
+        let n_layers = architecture.weight_layers().len();
         let estimated_capacity = 1  // embed_tokens
-        + architecture.weight_layers().len()  // layer weights
+        + n_layers  // layer weights
         + usize::from(!shared_classifier); // classifier if not shared
 
-        let mut weight_tensors = Vec::with_capacity(estimated_capacity);
+        let mut weight_tensors: Vec<(String, Option<String>, Option<u32>, bool)> =
+            Vec::with_capacity(estimated_capacity);
 
-        // First: embedding tokens
-        weight_tensors.push((architecture.embed_tokens_layer().to_string(), None, None));
-
-        // Then: layer weights
-        for WeightLayer { tensor_name, component, layer_idx } in architecture.weight_layers() {
-            weight_tensors.push((tensor_name.clone(), Some(component.to_string()), Some(*layer_idx)));
+        if has_v2 {
+            // v2 order: FP32 weight layers → Q8 embedding → Q8 weight layers
+            for wl in architecture.weight_layers() {
+                if wl.is_fp32 {
+                    weight_tensors.push((
+                        wl.tensor_name.clone(),
+                        Some(wl.component.to_string()),
+                        Some(wl.layer_idx),
+                        wl.is_fp32,
+                    ));
+                }
+            }
+            weight_tensors.push((architecture.embed_tokens_layer().to_string(), None, None, false));
+            for wl in architecture.weight_layers() {
+                if !wl.is_fp32 {
+                    weight_tensors.push((
+                        wl.tensor_name.clone(),
+                        Some(wl.component.to_string()),
+                        Some(wl.layer_idx),
+                        wl.is_fp32,
+                    ));
+                }
+            }
+        } else {
+            // v1 order: Q8 embedding → all weight layers (mixed FP32/Q8 in order)
+            weight_tensors.push((architecture.embed_tokens_layer().to_string(), None, None, false));
+            for wl in architecture.weight_layers() {
+                weight_tensors.push((
+                    wl.tensor_name.clone(),
+                    Some(wl.component.to_string()),
+                    Some(wl.layer_idx),
+                    wl.is_fp32,
+                ));
+            }
         }
 
-        // Then Classifier if not shared
+        // Classifier if not shared (always Q8, appended after all other weights)
         if !shared_classifier {
-            weight_tensors.push((architecture.lm_head_layer().to_string(), None, None));
+            weight_tensors.push((architecture.lm_head_layer().to_string(), None, None, false));
         }
 
         let lora_merger = if let ModelType::LoRA(lora_config) = model_type {
@@ -265,13 +329,15 @@ impl BinaryModelExporter {
             None
         };
 
-        let progress = ProgressTracker::new(weight_tensors.len(), "Quantizing");
+        let progress = ProgressTracker::new(weight_tensors.len(), "Processing weights");
+        let mut fp32_count = 0usize;
+        let mut q8_count = 0usize;
 
         // Process each weight tensor individually
         let max_errors: Result<Vec<f32>> = weight_tensors
             .iter()
             .enumerate()
-            .map(|(i, (tensor_name, tensor_type, layer_idx))| {
+            .map(|(i, (tensor_name, tensor_type, layer_idx, is_fp32))| {
                 progress.set_current(i + 1, Some(tensor_name));
 
                 // Load the base tensor (same for both base and LoRA models)
@@ -282,12 +348,10 @@ impl BinaryModelExporter {
                 // If LoRA is used, try to merge adapters
                 if let (Some(lora_merger), Some(layer_idx), Some(component)) =
                     (lora_merger.as_ref(), layer_idx, tensor_type.as_ref())
-                {
-                    if let Some(merged_weights) =
+                    && let Some(merged_weights) =
                         lora_merger.try_merge_lora_adapters(&weight_tensor, component, *layer_idx)?
-                    {
-                        weight_tensor = merged_weights;
-                    }
+                {
+                    weight_tensor = merged_weights;
                 }
 
                 if weight_tensor.is_empty() {
@@ -295,22 +359,32 @@ impl BinaryModelExporter {
                     return Ok(0.0);
                 }
 
-                // Quantize this tensor
-                let quantized = self.quantize_q80(&weight_tensor)?;
-
-                // Write quantized data using iterators
-                quantized.int8_data.iter().try_for_each(|&value| writer.write_i8(value))?;
-                quantized.scales.iter().try_for_each(|&scale| writer.write_f32::<LittleEndian>(scale))?;
-
-                Ok(quantized.max_error)
+                if *is_fp32 {
+                    // Write as raw FP32 (no quantization)
+                    for &value in &weight_tensor {
+                        writer.write_f32::<LittleEndian>(value)?;
+                    }
+                    fp32_count += 1;
+                    Ok(0.0f32)
+                } else {
+                    // Quantize this tensor to Q8 and write
+                    let quantized = self.quantize_q80(&weight_tensor)?;
+                    quantized.int8_data.iter().try_for_each(|&value| writer.write_i8(value))?;
+                    quantized.scales.iter().try_for_each(|&scale| writer.write_f32::<LittleEndian>(scale))?;
+                    q8_count += 1;
+                    Ok(quantized.max_error)
+                }
             })
             .collect();
 
         let max_errors = max_errors?;
-
-        // Print overall max error
         let overall_max_error = max_errors.iter().fold(0.0f32, |acc, &x| acc.max(x));
-        info!("Quantized {} weight tensors to Q8_0 with max error: {overall_max_error:.8}", weight_tensors.len());
+        info!(
+            "Processed {} weight tensors ({} Q8, {} FP32) with max Q8 error: {overall_max_error:.8}",
+            weight_tensors.len(),
+            q8_count,
+            fp32_count
+        );
 
         Ok(())
     }
